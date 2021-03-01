@@ -1,0 +1,173 @@
+---
+apiVersion: apps/v1
+kind: "StatefulSet"
+metadata:
+  name: "stockstat-2"
+  namespace: "default"
+  labels:
+    app: "stockstat-2"
+spec:
+  replicas: 2
+  podManagementPolicy: "Parallel"
+  serviceName: "stockstat-2"
+  selector:
+    matchLabels:
+      app: "stockstat-2"
+  # Set the volume we want for our application
+  volumeClaimTemplates:
+    - metadata:
+        name: rocksdbnew
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 1Gi
+  template:
+    metadata:
+      labels:
+        app: "stockstat-2"
+    spec:
+      volumes:
+        #Pass in the sensitive properties for our streams application
+        - name: secret-volume
+          secret:
+            secretName: streams-credentials
+        #Declare our configmap for jmx metrics as a volume
+        - name: streams-jmx-config-volume
+          configMap:
+            name: kstreams-jmx-config
+      containers:
+      - name: "stockstat-2"
+        # Mount the configmap and secret
+        volumeMounts:
+          - name: streams-jmx-config-volume
+            mountPath: /exporter/configs/
+          - name: secret-volume
+            mountPath: /root/.ccloud/
+          - name: rocksdbnew
+            mountPath: /var/kafka-streams/
+        # Expose port 9000
+        ports:
+          - containerPort: 9000
+        image: "docker.io/abrahamleal/streams-on-k8:latest"
+        imagePullPolicy: Always
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 1024Mi
+        # Set env variables
+        env:
+        - name: JAVA_TOOL_OPTIONS
+          value: -DLOGLEVEL=INFO
+        # Set liveness probe configs
+        livenessProbe:
+          httpGet:
+            path: /streams-check/liveness
+            port: 7000
+          initialDelaySeconds: 3
+          periodSeconds: 5
+          failureThreshold: 5
+        # Set readiness probe configs
+        readinessProbe:
+          httpGet:
+            path: /streams-check/readiness
+            port: 7000
+          initialDelaySeconds: 3
+          periodSeconds: 5
+          failureThreshold: 5
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: "kstreams-metrics"
+spec:
+  clusterIP: "None"
+  selector:
+    app: "stockstat-2"
+  ports:
+    - name: kstreams-metrics
+      protocol: TCP
+      port: 9000
+      targetPort: 9000
+---
+# Sensitive connection properties that we can set on the fly
+kind: Secret
+apiVersion: v1
+metadata:
+  name: streams-credentials
+type: Opaque
+data:
+  config: |-
+    Ym9vdHN0cmFwLnNlcnZlcnM9cGtjLTR5eWQ2LnVzLWVhc3QxLmdjcC5jb25mbHVlbnQuY2xvdWQ6OTA5MgpzZWN1cml0eS5wcm90b2NvbD1TQVNMX1NTTApzYXNsLm1lY2hhbmlzbT1QTEFJTgpzdGF0ZS5kaXI9L3Zhci9rYWZrYS1zdHJlYW1zLwpzYXNsLmphYXMuY29uZmlnPW9yZy5hcGFjaGUua2Fma2EuY29tbW9uLnNlY3VyaXR5LnBsYWluLlBsYWluTG9naW5Nb2R1bGUgcmVxdWlyZWQgXAp1c2VybmFtZT0iWkM3RkJUMlpXRjRCSjZTUCIgICBcCnBhc3N3b3JkPSJHY0JGM1oyTjQ5OXoyalVOcmZvZDdyczJDT0tnakpTdjdvNXhZaGJla2UzOVlWU0V3ZG1LWTNXTHkvOTZ3eTUrIjs=
+---
+# JMX configuration for our streams application
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: kstreams-jmx-config
+  labels:
+    name: kstreams-jmx-config
+  namespace: default
+data:
+  streams-jmx.yaml: |-
+    lowercaseOutputName: true
+    rules:
+      - pattern : 'kafka.streams<type=stream-metrics, client-id=(.*)><>(.+): (.+)'
+        value: 1
+        name: kafka_streams_app_info
+        labels:
+          client-id: $1
+          $2: $3
+        type: COUNTER
+      - pattern : 'kafka.streams<type=(.+), thread-id=(.+), task-id=(.*), (.+)=(.+)><>(.+):'
+        name: kafka_streams_$1_$6
+        type: GAUGE
+        labels:
+          thread-id: "$2"
+          task-id: "$3"
+          $4: "$5"
+      - pattern : 'kafka.streams<type=stream-task-metrics, thread-id=(.+), task-id=(.*)><>(.+):'
+        name: kafka_streams_stream-task-metrics_$3
+        type: GAUGE
+        labels:
+          thread-id: "$1"
+          task-id: "$2"
+      - pattern : 'kafka.streams<type=(.+), thread-id=(.+)><>(.+):'
+        name: kafka_streams_$1_$3
+        type: GAUGE
+        labels:
+          thread-id: "$2"
+      - pattern: 'kafka.consumer<type=app-info, client-id=(.+)><>(.+): (.+)'
+        value: 1
+        name: kafka_consumer_app_info
+        labels:
+          client-id: $1
+          $2: $3
+        type: UNTYPED
+      - pattern : 'kafka.consumer<type=(.+), client-id=(.+), node-id=(.+)><>(.+):'
+        name: kafka_consumer_$1_$4
+        type: GAUGE
+        labels:
+          client-id: "$2"
+          host-id: "$3"
+      - pattern : 'kafka.consumer<type=(.+), client-id=(.+), topic=(.+), partition=(.+)><>(.+):'
+        name: kafka_consumer_$1_$5
+        type: GAUGE
+        labels:
+          client-id: "$2"
+          topic: "$3"
+          partition: "$4"
+      - pattern : 'kafka.consumer<type=(.+), client-id=(.+), topic=(.+)><>(.+):'
+        name: kafka_consumer_$1_$4
+        type: GAUGE
+        labels:
+          client-id: "$2"
+          topic: "$3"
+      - pattern : 'kafka.consumer<type=(.+), client-id=(.+)><>(.+):'
+        name: kafka_consumer_$1_$3
+        type: GAUGE
+        labels:
+          client-id: "$2"
